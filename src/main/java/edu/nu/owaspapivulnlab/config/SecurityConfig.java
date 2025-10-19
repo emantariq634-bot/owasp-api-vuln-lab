@@ -19,6 +19,10 @@ import org.springframework.security.crypto.password.PasswordEncoder;     // <-- 
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import edu.nu.owaspapivulnlab.security.RateLimitFilter;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
 
 import java.io.IOException;
 import java.time.Instant;
@@ -31,6 +35,7 @@ import java.util.*;
  * - Simple fixed-window rate limiter (demo)
  */
 @Configuration
+@EnableMethodSecurity 
 public class SecurityConfig {
 
     private final JwtService jwt;
@@ -64,6 +69,16 @@ public class SecurityConfig {
             // Order matters: rate limit first, then JWT auth
             .addFilterBefore(new SimpleRateLimitFilter(60, 30), UsernamePasswordAuthenticationFilter.class)
             .addFilterBefore(new JwtAuthFilter(jwt), UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, RateLimitFilter rateLimitFilter) throws Exception {
+        // ... your existing config (authorizeHttpRequests, csrf, cors, etc.)
+
+        // Ensure rate limiting runs AFTER authentication so user-based keys work
+        http.addFilterAfter(rateLimitFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
