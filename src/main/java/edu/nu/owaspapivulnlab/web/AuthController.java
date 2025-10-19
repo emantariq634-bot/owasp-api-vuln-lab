@@ -1,72 +1,66 @@
 package edu.nu.owaspapivulnlab.web;
 
-import jakarta.validation.constraints.NotBlank;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
 import edu.nu.owaspapivulnlab.model.AppUser;
 import edu.nu.owaspapivulnlab.repo.AppUserRepository;
 import edu.nu.owaspapivulnlab.service.JwtService;
+import edu.nu.owaspapivulnlab.web.dto.LoginRequest;
+import edu.nu.owaspapivulnlab.web.dto.SignupRequest;
+import edu.nu.owaspapivulnlab.web.dto.TokenResponse;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Task 1: Password Security
+ * - Login verifies BCrypt (no plaintext compares).
+ * - Signup hashes password with BCrypt before saving.
+ * - Returns hardened JWT (Task 7 integration but safe here).
+ */
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
+
     private final AppUserRepository users;
+    private final PasswordEncoder encoder;
     private final JwtService jwt;
 
-    public AuthController(AppUserRepository users, JwtService jwt) {
+    public AuthController(AppUserRepository users, PasswordEncoder encoder, JwtService jwt) {
         this.users = users;
+        this.encoder = encoder;
         this.jwt = jwt;
     }
 
-    public static class LoginReq {
-        @NotBlank
-        private String username;
-        @NotBlank
-        private String password;
-
-        public LoginReq() {}
-
-        public LoginReq(String username, String password) {
-            this.username = username;
-            this.password = password;
+    @PostMapping("/signup")
+    public ResponseEntity<?> signup(@Valid @RequestBody SignupRequest req) {
+        // reject duplicate username
+        if (users.findByUsername(req.username()).isPresent()) {
+            return ResponseEntity.status(409).body(Map.of("error", "username_taken"));
         }
 
-        public String username() { return username; }
-        public String password() { return password; }
+        // hash (BCrypt) then save
+        AppUser u = new AppUser();
+        u.setUsername(req.username());
+        u.setEmail(req.email());
+        u.setPassword(encoder.encode(req.password())); // <-- hash here
+        u.setRole("ROLE_USER");                        // defensive default; no mass assignment
+        users.save(u);
 
-        public void setUsername(String username) { this.username = username; }
-        public void setPassword(String password) { this.password = password; }
-    }
-
-    public static class TokenRes {
-        private String token;
-
-        public TokenRes() {}
-
-        public TokenRes(String token) {
-            this.token = token;
-        }
-
-        public String getToken() { return token; }
-        public void setToken(String token) { this.token = token; }
+        // optional: auto-issue a token after signup
+        String token = jwt.issueToken(u.getUsername(), u.getRole());
+        return ResponseEntity.ok(new TokenResponse(token));
     }
 
     @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody LoginReq req) {
-        // VULNERABILITY(API2: Broken Authentication): plaintext password check, no lockout/rate limit/MFA
-        AppUser user = users.findByUsername(req.username()).orElse(null);
-        if (user != null && user.getPassword().equals(req.password())) {
-            Map<String, Object> claims = new HashMap<>();
-            claims.put("role", user.getRole());
-            claims.put("isAdmin", user.isAdmin()); // VULN: trusts client-side role later
-            String token = jwt.issue(user.getUsername(), claims);
-            return ResponseEntity.ok(new TokenRes(token));
+    public ResponseEntity<?> login(@Valid @RequestBody LoginRequest req) {
+        AppUser u = users.findByUsername(req.username()).orElse(null);
+        if (u == null || !encoder.matches(req.password(), u.getPassword())) {
+            // generic error to avoid user enumeration
+            return ResponseEntity.status(401).body(Map.of("error", "invalid_credentials"));
         }
-        Map<String, String> error = new HashMap<>();
-        error.put("error", "invalid credentials");
-        return ResponseEntity.status(401).body(error);
+        String token = jwt.issueToken(u.getUsername(), u.getRole());
+        return ResponseEntity.ok(new TokenResponse(token));
     }
 }
