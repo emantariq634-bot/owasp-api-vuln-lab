@@ -57,3 +57,4 @@ class AuthControllerIT {
                 .andExpect(jsonPath("$.error", anyOf(is("validation_error"), is("validation_failed"))));
     }
 }
+
