@@ -1,9 +1,15 @@
 package edu.nu.owaspapivulnlab.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.*;
 import lombok.*;
 
+/**
+ * User entity.
+ * SECURITY: Mark sensitive fields with @JsonIgnore so they never appear in JSON responses,
+ * even if someone accidentally returns the entity. Prefer returning DTOs (see later tasks).
+ */
 @Entity @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class AppUser {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -12,13 +18,14 @@ public class AppUser {
     @NotBlank
     private String username;
 
-    // VULNERABILITY(API3: Excessive Data Exposure): storing plaintext passwords for demo
-    // Students should hash with BCrypt and use proper credential storage.
+    @JsonIgnore                // <-- prevent password from being serialized
     @NotBlank
     private String password;
 
-    // VULNERABILITY(API6: Mass Assignment): role and isAdmin are bindable via incoming JSON
-    private String role;   // e.g., "USER" or "ADMIN"
+    @JsonIgnore                // <-- prevent role/isAdmin leaking
+    private String role;       // "ROLE_USER" or "ROLE_ADMIN"
+
+    @JsonIgnore
     private boolean isAdmin;
 
     @Email

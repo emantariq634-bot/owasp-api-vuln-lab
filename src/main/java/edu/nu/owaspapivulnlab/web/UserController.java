@@ -1,54 +1,76 @@
 package edu.nu.owaspapivulnlab.web;
 
-import jakarta.validation.Valid;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
 import edu.nu.owaspapivulnlab.model.AppUser;
 import edu.nu.owaspapivulnlab.repo.AppUserRepository;
+import edu.nu.owaspapivulnlab.security.CurrentUserService;
+import edu.nu.owaspapivulnlab.web.dto.UserDto;
+import edu.nu.owaspapivulnlab.web.dto.UpdateProfileRequest;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
+
     private final AppUserRepository users;
+    private final CurrentUserService current;
+    private final PasswordEncoder encoder;
 
-    public UserController(AppUserRepository users) {
+    public UserController(AppUserRepository users, CurrentUserService current, PasswordEncoder encoder) {
         this.users = users;
+        this.current = current;
+        this.encoder = encoder;
     }
 
-    // VULNERABILITY(API1: BOLA/IDOR) - no ownership check, any authenticated OR anonymous GET (due to SecurityConfig) can fetch any user
+    private static UserDto toDto(AppUser u) {
+        return new UserDto(u.getId(), u.getUsername(), u.getEmail()); // Task 4 DTO (no password/role/isAdmin)
+    }
+
+    @GetMapping("/me")
+    public ResponseEntity<?> me(Authentication auth) {
+        return current.current(auth)
+                .<ResponseEntity<?>>map(u -> ResponseEntity.ok(toDto(u)))
+                .orElseGet(() -> ResponseEntity.status(401).body(Map.of("error","unauthenticated")));
+    }
+
     @GetMapping("/{id}")
-    public AppUser get(@PathVariable Long id) {
-        return users.findById(id).orElseThrow(() -> new RuntimeException("User not found"));
+    public ResponseEntity<?> get(@PathVariable("id") Long id, Authentication auth) {
+        Long callerId = current.currentUserId(auth).orElse(null);
+        if (callerId == null) return ResponseEntity.status(401).body(Map.of("error","unauthenticated"));
+
+        boolean isAdmin = current.hasRole(auth, "ADMIN");
+        if (!isAdmin && !id.equals(callerId)) {
+            return ResponseEntity.status(403).body(Map.of("error","forbidden"));
+        }
+
+        return users.findById(id)
+                .<ResponseEntity<?>>map(u -> ResponseEntity.ok(toDto(u)))
+                .orElseGet(() -> ResponseEntity.status(404).body(Map.of("error","not_found")));
     }
 
-    // VULNERABILITY(API6: Mass Assignment) - binds role/isAdmin from client
-    @PostMapping
-    public AppUser create(@Valid @RequestBody AppUser body) {
-        return users.save(body);
-    }
+    /**
+     * Task 6: Safe self-update (no role/isAdmin allowed).
+     * Accepts only email/password via UpdateProfileRequest; validation via annotations.
+     */
+    @PutMapping("/me")
+    public ResponseEntity<?> updateMe(@Valid @RequestBody UpdateProfileRequest req, Authentication auth) {
+        AppUser me = current.current(auth).orElse(null);
+        if (me == null) return ResponseEntity.status(401).body(Map.of("error","unauthenticated"));
 
-    // VULNERABILITY(API9: Improper Inventory + API8 Injection style): naive 'search' that can be abused for enumeration
-    @GetMapping("/search")
-    public List<AppUser> search(@RequestParam String q) {
-        return users.search(q);
-    }
+        // Whitelisted updates only:
+        if (req.getEmail() != null) {
+            me.setEmail(req.getEmail().trim());
+        }
+        if (req.getPassword() != null && !req.getPassword().isBlank()) {
+            me.setPassword(encoder.encode(req.getPassword())); // server-side encode (no plaintext)
+        }
 
-    // VULNERABILITY(API3: Excessive Data Exposure) - returns all users including sensitive fields
-    @GetMapping
-    public List<AppUser> list() {
-        return users.findAll();
-    }
-
-    // VULNERABILITY(API5: Broken Function Level Authorization) - allows regular users to delete anyone
-    @DeleteMapping("/{id}")
-    public ResponseEntity<?> delete(@PathVariable Long id) {
-        users.deleteById(id);
-        Map<String, String> response = new HashMap<>();
-        response.put("status", "deleted");
-        return ResponseEntity.ok(response);
+        users.save(me);
+        return ResponseEntity.ok(Map.of("status", "updated", "user", toDto(me)));
     }
 }
