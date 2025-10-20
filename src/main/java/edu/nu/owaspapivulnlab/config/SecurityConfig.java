@@ -1,5 +1,6 @@
 package edu.nu.owaspapivulnlab.config;
 
+import edu.nu.owaspapivulnlab.logging.RequestCorrelationFilter;           // NEW
 import edu.nu.owaspapivulnlab.security.JwtAuthenticationFilter;
 import edu.nu.owaspapivulnlab.security.RateLimitFilter;
 import edu.nu.owaspapivulnlab.service.JwtService;
@@ -31,6 +32,7 @@ public class SecurityConfig {
                                                    RateLimitFilter rateLimitFilter) throws Exception {
 
         JwtAuthenticationFilter jwtFilter = new JwtAuthenticationFilter(jwtService);
+        RequestCorrelationFilter correlationFilter = new RequestCorrelationFilter(); // NEW
 
         http
             .csrf(csrf -> csrf.disable())
@@ -43,6 +45,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
             )
+            // NEW: Correlation-ID filter at the very front
+            .addFilterBefore(correlationFilter, UsernamePasswordAuthenticationFilter.class)
             // STRICT: invalid/expired/tampered -> 401
             .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
             // Rate limiting after auth so it can key by user/IP as you configured there
