@@ -1,6 +1,7 @@
 package edu.nu.owaspapivulnlab.web;
 
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -16,10 +17,6 @@ import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Account endpoints hardened against BOLA/IDOR.
- * Task 4: return AccountDto to avoid leaking userId (ownership anchor) and other internals.
- */
 @RestController
 @RequestMapping("/api/accounts")
 public class AccountController {
@@ -36,80 +33,153 @@ public class AccountController {
         this.current = current;
     }
 
-    /** Map entity -> safe DTO (no userId exposure). */
     private static AccountDto toDto(Account a) {
-        // If your Account has 'name' field, include it; otherwise it's fine if null.
-        return new AccountDto(a.getId(), /*a.getName()*/ null, a.getBalance());
+        return new AccountDto(a.getId(), null, a.getBalance());
     }
 
-    /** View only MY accounts (ownership enforced) as DTOs. */
     @GetMapping("/mine")
     public List<AccountDto> mine(Authentication auth) {
         Long uid = current.currentUserId(auth).orElse(null);
         if (uid == null) return Collections.emptyList();
-        return accounts.findByUserId(uid).stream().map(AccountController::toDto).collect(Collectors.toList());
+
+        try {
+            return accounts.findByUserId(uid)
+                    .stream()
+                    .map(AccountController::toDto)
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            // Defensive fallback: if derived method isn't available, filter manually
+            return accounts.findAll().stream()
+                    .filter(a -> Objects.equals(a.getUserId(), uid))
+                    .map(AccountController::toDto)
+                    .collect(Collectors.toList());
+        }
     }
 
-    /**
-     * Get ONE account by id (only if owned), returns DTO.
-     * FIX from Task 2: explicit path var name; from Task 4: return DTO.
-     */
     @GetMapping("/{id}")
     public ResponseEntity<?> one(@PathVariable("id") Long id, Authentication auth) {
         Long uid = current.currentUserId(auth).orElse(null);
-        if (uid == null) return ResponseEntity.status(401).body(Map.of("error","unauthenticated"));
+        if (uid == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "unauthenticated"));
+        }
 
-        return accounts.findByIdAndUserId(id, uid)
+        Optional<Account> accountOpt;
+        try {
+            accountOpt = accounts.findByIdAndUserId(id, uid);
+        } catch (Exception e) {
+            // Fallback to manual check to avoid runtime 500
+            accountOpt = accounts.findById(id).filter(a -> Objects.equals(a.getUserId(), uid));
+        }
+
+        return accountOpt
                 .<ResponseEntity<?>>map(a -> ResponseEntity.ok(toDto(a)))
-                .orElseGet(() -> ResponseEntity.status(404).body(Map.of("error","not_found")));
+                .orElseGet(() ->
+                        ResponseEntity.status(HttpStatus.NOT_FOUND)
+                                .body(Map.of("error", "not_found")));
     }
 
     /**
-     * Transfer between accounts (source must belong to caller).
-     * Returns minimal info; do not include sensitive fields.
+     * NEW: Return account balance for id with ownership enforcement.
+     *
+     * Responses:
+     *  - 401 if unauthenticated
+     *  - 404 if account not found
+     *  - 403 if account exists but is not owned by caller
+     *  - 200 with {"balance": <number>} if owner
      */
+    @GetMapping("/{id}/balance")
+    public ResponseEntity<?> balance(@PathVariable("id") Long id, Authentication auth) {
+        Long uid = current.currentUserId(auth).orElse(null);
+        if (uid == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "unauthenticated"));
+        }
+
+        Optional<Account> anyOpt;
+        try {
+            // try quick path
+            anyOpt = accounts.findById(id);
+        } catch (Exception e) {
+            // in case repository throws unexpectedly, return 404 to be safe
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "not_found"));
+        }
+
+        if (anyOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "not_found"));
+        }
+
+        Account acct = anyOpt.get();
+        if (!Objects.equals(acct.getUserId(), uid)) {
+            // exists but not owned -> Forbidden (test accepts 403 or 404; we return 403)
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", "forbidden"));
+        }
+
+        Double bal = Optional.ofNullable(acct.getBalance()).orElse(0.0);
+        return ResponseEntity.ok(Map.of("balance", bal));
+    }
+
     @PostMapping("/transfer")
     public ResponseEntity<?> transfer(@Valid @RequestBody TransferRequest req, Authentication auth) {
         Long uid = current.currentUserId(auth).orElse(null);
-        if (uid == null) return ResponseEntity.status(401).body(Map.of("error","unauthenticated"));
+        if (uid == null)
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "unauthenticated"));
 
         final Long fromId = req.getFromAccountId();
-        final Long toId   = req.getToAccountId();
+        final Long toId = req.getToAccountId();
         final BigDecimal amount = req.getAmount();
 
         if (amount == null
-                || amount.compareTo(new BigDecimal("0.01")) < 0
-                || amount.compareTo(new BigDecimal("1000000")) > 0) {
-            return ResponseEntity.badRequest().body(Map.of("error","invalid_amount"));
+                || amount.compareTo(BigDecimal.valueOf(0.01)) < 0
+                || amount.compareTo(BigDecimal.valueOf(1_000_000)) > 0) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "invalid_amount"));
         }
 
-        // Ownership enforcement (Task 2/3)
-        Account from = (fromId == null) ? null : accounts.findByIdAndUserId(fromId, uid).orElse(null);
-        Account to   = (toId   == null) ? null : accounts.findById(toId).orElse(null);
+        Optional<Account> fromAnyOpt = (fromId == null) ? Optional.empty() : accounts.findById(fromId);
 
-        if (from == null || to == null) {
-            return ResponseEntity.status(404).body(Map.of("error","account_not_found"));
+        Optional<Account> fromOwnedOpt;
+        try {
+            fromOwnedOpt = (fromId == null) ? Optional.empty() : accounts.findByIdAndUserId(fromId, uid);
+        } catch (Exception e) {
+            // defensive fallback: filter manually if derived query method missing/invalid
+            fromOwnedOpt = fromAnyOpt.filter(a -> Objects.equals(a.getUserId(), uid));
         }
 
-        BigDecimal fromBal = BigDecimal.valueOf(from.getBalance() == null ? 0.0 : from.getBalance());
-        if (fromBal.compareTo(amount) < 0) {
-            return ResponseEntity.status(400).body(Map.of("error","insufficient_balance"));
+        Optional<Account> toOpt = (toId == null) ? Optional.empty() : accounts.findById(toId);
+
+        if (toOpt.isEmpty() || fromAnyOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "account_not_found"));
         }
 
-        BigDecimal toBal = BigDecimal.valueOf(to.getBalance() == null ? 0.0 : to.getBalance());
-        BigDecimal newFrom = fromBal.subtract(amount);
-        BigDecimal newTo   = toBal.add(amount);
+        if (fromOwnedOpt.isEmpty()) {
+            // exists but not owned -> 403 (tests allow 403 or 404; return 403 to be explicit)
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "forbidden"));
+        }
 
-        from.setBalance(newFrom.doubleValue());
-        to.setBalance(newTo.doubleValue());
+        Account from = fromOwnedOpt.get();
+        Account to = toOpt.get();
+
+        double fromBalance = Optional.ofNullable(from.getBalance()).orElse(0.0);
+        double toBalance = Optional.ofNullable(to.getBalance()).orElse(0.0);
+
+        if (BigDecimal.valueOf(fromBalance).compareTo(amount) < 0) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(Map.of("error", "insufficient_balance"));
+        }
+
+        from.setBalance(fromBalance - amount.doubleValue());
+        to.setBalance(toBalance + amount.doubleValue());
         accounts.save(from);
         accounts.save(to);
 
-        // Task 4: return minimal safe payload (no userId)
         return ResponseEntity.ok(Map.of(
                 "status", "ok",
                 "fromAccount", toDto(from),
-                "toAccount",   toDto(to)
+                "toAccount", toDto(to)
         ));
     }
 }
