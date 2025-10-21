@@ -1,3 +1,4 @@
+
 package edu.nu.owaspapivulnlab.it;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,3 +58,6 @@ class AuthControllerIT {
                 .andExpect(jsonPath("$.error", anyOf(is("validation_error"), is("validation_failed"))));
     }
 }
+
+
+>>>>>>> 2a9328f22396125f4357df3e4fe535118f20c0b4
